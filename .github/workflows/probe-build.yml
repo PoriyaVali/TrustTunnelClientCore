@@ -178,7 +178,7 @@ jobs:
             fi
           done
           echo "=== recipes now in the cache ==="
-          conan list "*" 2>/dev/null | grep -E "^[a-z]" | sed "s/^/  /" | head -30
+          conan list "*" 2>/dev/null | grep -E "^[a-z]" | head -30 | sed "s/^/  /" || true  # || true: under set -e + pipefail, head closing the pipe kills the step
 
       # continue-on-error makes GitHub report this step as "success" even when it
       # failed - that read as progress once and was not. The summary below is the
