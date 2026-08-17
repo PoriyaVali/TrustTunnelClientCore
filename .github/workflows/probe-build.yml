@@ -219,28 +219,10 @@ jobs:
         run: |
           rustup target add aarch64-linux-android armv7-linux-androideabi
           rustc --version
-
-      # Lightweight means one ABI. Each extra one is a full copy of the native
-      # library, and our users are on arm64.
-      - name: Build only the ABI we ship
-        if: startsWith(inputs.target, 'android')
-        working-directory: client/platform/android
-        run: |
-          abi=$([ "${{ inputs.target }}" = "android-arm64" ] && echo arm64-v8a || echo armeabi-v7a)
-          python3 - "$abi" <<'PY'
-          import io, sys
-          abi = sys.argv[1]
-          p = "lib/build.gradle.kts"
-          d = io.open(p, encoding="utf-8").read()
-          anchor = "        externalNativeBuild {"
-          assert d.count(anchor) == 1, "defaultConfig externalNativeBuild not found"
-          d = d.replace(anchor, '        ndk {
-            abiFilters += "%s"
-        }
-' % abi + anchor, 1)
-          io.open(p, "w", encoding="utf-8", newline="").write(d)
-          print("restricted to", abi)
-          PY
+      # Note: this builds every ABI the project defines. Restricting it to the
+      # one we ship is a size optimisation, and belongs after the build is
+      # known to work at all - not in the run that is still asking whether it
+      # does.
 
       # The actual thing the app needs. Allowed to fail: this is still a probe,
       # and where it stops is the answer.
@@ -254,8 +236,7 @@ jobs:
       - name: Did an AAR come out?
         if: startsWith(inputs.target, 'android')
         run: |
-          find client/platform/android -name "*.aar" -printf "  %p  %s bytes
-" 2>/dev/null || echo "  no AAR produced"
+          find client/platform/android -name "*.aar" -exec ls -lh {} + 2>/dev/null || echo "  no AAR produced"
 
       - name: What we learned
         run: |
