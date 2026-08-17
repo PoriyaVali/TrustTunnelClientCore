@@ -1,0 +1,114 @@
+name: probe-build
+
+# Find out what it actually takes to build the Android core, on a runner that
+# can reach the package index.
+#
+# conancenter answers 403 from our network, so a local build cannot even resolve
+# brotli - a dependency that plainly exists. That is a network fact, not a
+# project fact, and it means this question can only be answered here. The same
+# thing was true of the endpoint: Windows could not compile it, and CI became
+# the compiler.
+#
+# This workflow is deliberately allowed to fail. Its output is the answer.
+
+on:
+  workflow_dispatch:
+    inputs:
+      client_ref:
+        description: 'Ref of PoriyaVali/TrustTunnelClient to probe'
+        default: 'master'
+      drop_dns_libs:
+        description: 'Remove dns-libs before resolving (it never runs in our config)'
+        type: boolean
+        default: true
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the client
+        uses: actions/checkout@v4
+        with:
+          repository: PoriyaVali/TrustTunnelClient
+          ref: ${{ inputs.client_ref }}
+          path: client
+
+      - name: Confirm the index is reachable from here
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' https://center2.conan.io/v2/ping || true)
+          echo "conancenter ping: HTTP $code"
+          [ "$code" = "200" ] || echo "note: not 200 - the rest of this run will say whether it matters"
+
+      - name: Tools
+        run: |
+          python3 -m pip install --quiet "conan>=2.0"
+          conan --version
+          echo "NDK: ${ANDROID_NDK_LATEST_HOME:-none}"
+          ls "${ANDROID_NDK_LATEST_HOME}" >/dev/null && echo "NDK present"
+
+      # Upstream ships these publicly, which is worth knowing: the Android
+      # cross-compilation profile does not have to be written from scratch.
+      - name: AdGuard's own conan profiles
+        run: |
+          curl -sL -o /tmp/conanfiles.tar.gz \
+            https://github.com/AdguardTeam/NativeLibsCommon/releases/latest/download/conanfiles.tar.gz
+          mkdir -p /tmp/cf && tar -xzf /tmp/conanfiles.tar.gz -C /tmp/cf
+          conan profile detect --force
+          CH="$(conan config home)"
+          cp /tmp/cf/profiles/* "$CH/profiles/"
+          cp /tmp/cf/settings_user.yml "$CH/" 2>/dev/null || true
+          cat > "$CH/profiles/android-arm64" <<'EOF'
+          include(android.jinja)
+
+          [settings]
+          os=Android
+          os.api_level=26
+          arch=armv8
+          compiler=clang
+          compiler.version=18
+          compiler.libcxx=c++_static
+          compiler.cppstd=20
+          build_type=Release
+          EOF
+          echo "tools.android:ndk_path=${ANDROID_NDK_LATEST_HOME}" >> "$CH/profiles/android-arm64"
+          conan profile show -pr android-arm64 | head -20
+
+      # In our configuration the DNS proxy is never constructed: dns_handler
+      # returns early when dns_upstreams is empty, and Irboard does not emit
+      # deep-link tag 0x0D. So dropping it changes size, not behaviour - and it
+      # is the heaviest of the seven AdGuard-namespaced dependencies.
+      - name: Drop dns-libs
+        if: ${{ inputs.drop_dns_libs }}
+        working-directory: client
+        run: |
+          python3 - <<'PY'
+          import io
+          p = "conanfile.py"
+          out = []
+          for line in io.open(p, encoding="utf-8").read().split("\n"):
+              if "dns-libs" in line and "self.requires" in line:
+                  indent = line[:len(line) - len(line.lstrip())]
+                  out.append(indent + "pass  # dropped: never constructed in our config")
+              else:
+                  out.append(line)
+          io.open(p, "w", encoding="utf-8", newline="").write("\n".join(out))
+          PY
+          grep -n "dns-libs" conanfile.py || echo "dns-libs removed"
+
+      # The point of the run. Expected to fail on the first AdGuard-namespaced
+      # package; what matters is how far it gets first, and whether everything
+      # else resolves.
+      - name: Resolve dependencies
+        working-directory: client
+        continue-on-error: true
+        run: |
+          conan install . -pr:h android-arm64 -pr:b default --build=missing -of /tmp/out 2>&1 | tee /tmp/resolve.log
+
+      - name: What we learned
+        run: |
+          echo "=== packages that resolved ==="
+          grep -oE "^[a-z0-9_.-]+/[0-9][^:]*: (Downloaded|Already installed|Building)" /tmp/resolve.log | sort -u | sed 's/^/  /' || echo "  none"
+          echo "=== first failure ==="
+          grep -E "^ERROR" /tmp/resolve.log | head -3 | sed 's/^/  /' || echo "  none - it got through"
+          echo "=== packages still unresolvable ==="
+          grep -oE "[a-z0-9_.-]+/[^@ ]+@adguard/oss" /tmp/resolve.log | sort -u | sed 's/^/  /' || echo "  none"
