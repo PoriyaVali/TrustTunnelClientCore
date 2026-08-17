@@ -23,20 +23,31 @@ tag = sys.argv[3] if len(sys.argv) > 3 else "v1.0.41-dm.3"
 
 UPSTREAM = "https://github.com/TrustTunnel/TrustTunnel"
 
-# Both crates carry the same dependency line; missing one leaves cargo
-# resolving two different sources for one crate name, which fails in a way
-# that does not mention either file.
-FILES = [
-    "trusttunnel/settings/Cargo.toml",
-    "trusttunnel/deeplink-ffi/Cargo.toml",
-]
+
+def cargo_files():
+    """Every Cargo.toml that names upstream - found, not listed.
+
+    Listing them cost a run. I knew about settings/ and deeplink-ffi/, patched
+    exactly those, and setup_wizard/ declares the same dependency. The point is
+    not that there were three; it is that the number is not mine to know. Same
+    shape as searching for the CMake files in drop_dns_libs.py, and as
+    exporting every Conan recipe instead of the ones a conanfile happens to
+    name - this project has now taught the same lesson three times.
+    """
+    found = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in (".git", "target", "build")]
+        if "Cargo.toml" not in filenames:
+            continue
+        p = os.path.join(dirpath, "Cargo.toml")
+        if UPSTREAM in io.open(p, encoding="utf-8", errors="ignore").read():
+            found.append(os.path.relpath(p, root).replace(os.sep, "/"))
+    return sorted(found)
+
 
 patched = 0
-for rel in FILES:
+for rel in cargo_files():
     path = os.path.join(root, rel)
-    if not os.path.exists(path):
-        print("  missing, skipped:", rel)
-        continue
     lines = io.open(path, encoding="utf-8").read().split("\n")
     hits = 0
     for i, line in enumerate(lines):
