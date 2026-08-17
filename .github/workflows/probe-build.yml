@@ -219,6 +219,17 @@ jobs:
         run: |
           rustup target add aarch64-linux-android armv7-linux-androideabi
           rustc --version
+      # Gradle runs the CMake bundled with the SDK, which is 3.22.1, while the
+      # project's root CMakeLists asks for 3.24. Install a newer one and point
+      # the build at it explicitly rather than hoping AGP picks it.
+      - name: A CMake new enough for the project
+        if: startsWith(inputs.target, 'android')
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "cmake;3.31.6" >/dev/null 2>&1 || true
+          ls "$ANDROID_HOME/cmake" | sed "s/^/  available: /"
+          echo "cmake.dir=$ANDROID_HOME/cmake/3.31.6" >> client/platform/android/local.properties
+          cat client/platform/android/local.properties
+
       # Note: this builds every ABI the project defines. Restricting it to the
       # one we ship is a size optimisation, and belongs after the build is
       # known to work at all - not in the run that is still asking whether it
@@ -231,7 +242,7 @@ jobs:
         continue-on-error: true
         working-directory: client/platform/android
         run: |
-          ./gradlew :lib:assembleRelease --no-daemon 2>&1 | tail -60
+          ./gradlew :lib:assembleRelease --no-daemon 2>&1 | tail -200
 
       - name: Did an AAR come out?
         if: startsWith(inputs.target, 'android')
