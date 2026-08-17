@@ -49,6 +49,11 @@ jobs:
           repository: PoriyaVali/TrustTunnelClient
           ref: ${{ inputs.client_ref }}
           path: client
+          # Full history, for the tags. The library version comes from
+          # `git describe --tags`, and a shallow clone has none - which is why
+          # the first AAR built as 0.0.0-git. An artefact we intend to publish
+          # and pin needs to say what it is.
+          fetch-depth: 0
 
       - name: Tools
         run: |
@@ -244,11 +249,12 @@ jobs:
         if: startsWith(inputs.target, 'android')
         run: python3 scripts/select_abis.py client "${{ inputs.abis }}"
 
-      # The actual thing the app needs. Allowed to fail: this is still a probe,
-      # and where it stops is the answer.
+      # The actual thing the app needs. This built successfully on
+      # b9a2c54, so it is no longer a probe that is allowed to fail:
+      # continue-on-error would now hide a regression behind a green run, and
+      # it already did that once.
       - name: Build the AAR
         if: startsWith(inputs.target, 'android')
-        continue-on-error: true
         working-directory: client/platform/android
         run: |
           # Keep the whole build log and pull the errors out of it. Tailing it
@@ -266,10 +272,29 @@ jobs:
           echo "=== last 40 lines ==="
           tail -40 /tmp/gradle.log
 
-      - name: Did an AAR come out?
+      # An AAR that only ever existed on a runner is not a deliverable. The
+      # first successful build produced one and it was gone the moment the job
+      # ended.
+      - name: Inspect the AAR
         if: startsWith(inputs.target, 'android')
         run: |
-          find client/platform/android -name "*.aar" -exec ls -lh {} + 2>/dev/null || echo "  no AAR produced"
+          AAR=$(find client/platform/android -name "*.aar" | head -1)
+          if [ -z "$AAR" ]; then echo "  no AAR produced"; exit 1; fi
+          ls -lh "$AAR"
+          echo "=== native libraries inside ==="
+          # The point of the build. An AAR with no .so in it would still be a
+          # valid AAR, and would fail at runtime instead of here.
+          unzip -l "$AAR" | grep "\.so$" || { echo "  NO .so IN THE AAR"; exit 1; }
+          echo "=== every ABI present ==="
+          unzip -l "$AAR" | grep -oE "jni/[a-z0-9_-]+" | sort -u
+
+      - name: Keep the AAR
+        if: startsWith(inputs.target, 'android')
+        uses: actions/upload-artifact@v4
+        with:
+          name: trusttunnel-client-${{ inputs.target }}
+          path: client/platform/android/lib/build/outputs/aar/*.aar
+          if-no-files-found: error
 
       - name: What we learned
         run: |
