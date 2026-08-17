@@ -77,16 +77,38 @@ DnsProxyAccessor::~DnsProxyAccessor() = default;
 '''
 
 
+def all_cmake_files():
+    """Every CMakeLists that mentions the package.
+
+    Patching core/CMakeLists.txt alone left common/CMakeLists.txt:43 asking for
+    it, and configure failed the same way one run later. Search rather than
+    list: the point is not to know how many there are.
+    """
+    found = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [x for x in dirnames if x not in (".git", "third-party", "build")]
+        for fn in filenames:
+            if fn == "CMakeLists.txt" or fn.endswith(".cmake"):
+                p = os.path.join(dirpath, fn)
+                try:
+                    if "dns-libs" in io.open(p, encoding="utf-8", errors="ignore").read():
+                        found.append(os.path.relpath(p, root))
+                except OSError:
+                    pass
+    return found
+
+
 def main():
     edit("conanfile.py", drop_requirement)
-    edit("core/CMakeLists.txt", drop_cmake)
+    for rel in all_cmake_files():
+        edit(rel, drop_cmake)
     p = os.path.join(root, "core/src/dns_proxy_accessor.cpp")
     io.open(p, "w", encoding="utf-8", newline="").write(STUB)
     print("  stubbed core/src/dns_proxy_accessor.cpp")
 
     # Prove it: nothing outside the stub should still reference the package.
     bad = []
-    for sub in ("conanfile.py", "core/CMakeLists.txt"):
+    for sub in ["conanfile.py"] + all_cmake_files():
         d = io.open(os.path.join(root, sub), encoding="utf-8").read()
         for line in d.split("\n"):
             s = line.strip()
