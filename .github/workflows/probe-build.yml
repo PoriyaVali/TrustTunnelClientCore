@@ -24,7 +24,7 @@ on:
         description: 'Ref of PoriyaVali/TrustTunnelClient'
         default: 'master'
       drop_dns_libs:
-        description: 'Remove dns-libs (trim AFTER the build works - it is also referenced by core/CMakeLists.txt)'
+        description: 'Remove dns-libs. Owner decided to KEEP it: DNS handling matters too much in Iran to trade for size'
         type: boolean
         default: false
 
@@ -140,17 +140,16 @@ jobs:
             https://github.com/AdguardTeam/NativeLibsCommon /tmp/nlc
           conan export /tmp/nlc --version 8.1.49 --user adguard --channel oss
 
-          # DnsLibs is public as well. Exported unconditionally: the trimming
-          # step removes it from the Conan requirements but core/CMakeLists.txt
-          # still calls find_package(dns-libs), so dropping one without the
-          # other fails at configure time - which is exactly what happened.
-          git clone --quiet --depth 1 --branch v2.10.1 https://github.com/AdguardTeam/DnsLibs /tmp/dnslibs || true
-          if [ -f /tmp/dnslibs/conanfile.py ]; then
-            conan export /tmp/dnslibs --version 2.10.1-1-g7748c6a7 --user adguard --channel oss || echo "  dns-libs export failed"
-          else
-            echo "  DnsLibs: no conanfile.py at that tag"
-            ls /tmp/dnslibs | head -10
-          fi
+          # DnsLibs at the exact commit the client asks for, not at the tag.
+          # The client wants dns-libs/2.10.1-1-g7748c6a7 - one commit after
+          # v2.10.1 - and that commit is precisely the one that bumps
+          # native_libs_common from 8.1.48 to 8.1.49. Exporting from the tag
+          # produced a version conflict that does not exist upstream.
+          git clone --quiet --filter=blob:none https://github.com/AdguardTeam/DnsLibs /tmp/dnslibs
+          git -C /tmp/dnslibs checkout --quiet 7748c6a7
+          echo "  DnsLibs pins: $(grep -o 'native_libs_common/[0-9.]*' /tmp/dnslibs/conanfile.py | head -1)"
+          conan export /tmp/dnslibs --version 2.10.1-1-g7748c6a7 --user adguard --channel oss
+
 
           # Export every recipe rather than the ones named in a conanfile.
           # Chasing them one at a time missed transitive ones - bringing
