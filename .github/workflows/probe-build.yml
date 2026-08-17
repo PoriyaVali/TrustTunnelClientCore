@@ -27,6 +27,9 @@ on:
         description: 'Remove dns-libs. Owner decided to KEEP it: DNS handling matters too much in Iran to trade for size'
         type: boolean
         default: false
+      abis:
+        description: 'Android ABIs to build. Upstream builds all four; we ship two'
+        default: 'arm64-v8a,armeabi-v7a'
 
 jobs:
   probe:
@@ -198,8 +201,22 @@ jobs:
           # silently go back to equipping the wrong toolchain.
           CHANNEL=$(grep channel client/rust-toolchain.toml | cut -d'"' -f2)
           echo "  the client pins: $CHANNEL"
-          rustup toolchain install "$CHANNEL" --profile minimal \
-            --target aarch64-linux-android --target armv7-linux-androideabi
+          # Derive the Rust targets from the ABI list rather than listing them
+          # twice. The two drifting apart is exactly how the x86 failure
+          # happened: the ABI was built, its target was never installed.
+          TARGETS=""
+          for abi in $(echo "${{ inputs.abis }}" | tr ',' ' '); do
+            case "$abi" in
+              arm64-v8a)   t=aarch64-linux-android ;;
+              armeabi-v7a) t=armv7-linux-androideabi ;;
+              x86_64)      t=x86_64-linux-android ;;
+              x86)         t=i686-linux-android ;;
+              *) echo "  unknown ABI: $abi"; exit 1 ;;
+            esac
+            echo "  $abi -> $t"
+            TARGETS="$TARGETS --target $t"
+          done
+          rustup toolchain install "$CHANNEL" --profile minimal $TARGETS
           # The build invokes `cargo ndk`, not plain cargo: cargo-ndk is what
           # sets the Android linker and sysroot for each target. Adding the
           # rustup targets alone is not enough - the command itself is missing.
@@ -219,10 +236,13 @@ jobs:
           echo "cmake.dir=$ANDROID_HOME/cmake/3.31.6" >> client/platform/android/local.properties
           cat client/platform/android/local.properties
 
-      # Note: this builds every ABI the project defines. Restricting it to the
-      # one we ship is a size optimisation, and belongs after the build is
-      # known to work at all - not in the run that is still asking whether it
-      # does.
+      # This turned out to be more than a size optimisation. Upstream sets no
+      # abiFilters, so AGP builds all four ABIs, and the run that finally got
+      # arm64 through then failed on x86 - which no device in our fleet uses,
+      # and whose Rust target we deliberately did not install.
+      - name: Only the ABIs we ship
+        if: startsWith(inputs.target, 'android')
+        run: python3 scripts/select_abis.py client "${{ inputs.abis }}"
 
       # The actual thing the app needs. Allowed to fail: this is still a probe,
       # and where it stops is the answer.
