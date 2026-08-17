@@ -12,6 +12,7 @@
 # while the client asks for 8.1.49.
 import io
 import os
+import re
 import sys
 
 root = sys.argv[1] if len(sys.argv) > 1 else "client"
@@ -39,12 +40,32 @@ def drop_requirement(d):
 
 
 def drop_cmake(d):
+    """Remove the references, not the lines that hold them.
+
+    Commenting out whole lines broke common/CMakeLists.txt: the reference sat
+    on the closing line of a multi-line target_link_libraries, so the call lost
+    its ")" and CMake reported a parse error at end of file. A line is only safe
+    to comment out when it is a complete call by itself.
+    """
     out = []
     for line in d.split("\n"):
-        if "dns-libs" in line:
-            out.append("# " + line + "  # dropped with the DNS proxy")
-        else:
+        if "dns-libs" not in line:
             out.append(line)
+            continue
+        stripped = line.strip()
+        # A self-contained find_package(...) can go entirely.
+        if stripped.startswith("find_package(") and stripped.endswith(")"):
+            out.append("# " + line + "  # dropped with the DNS proxy")
+            continue
+        # Otherwise strip just the target and keep the surrounding call intact.
+        cleaned = re.sub(r"\s*dns-libs::dns-libs", "", line)
+        cleaned = re.sub(r"\s*dns-libs\b", "", cleaned)
+        if cleaned.strip() in ("", ")"):
+            # The reference was the only thing on the line; keep any closing
+            # bracket so the call still terminates.
+            out.append(cleaned if cleaned.strip() == ")" else "")
+        else:
+            out.append(cleaned)
     return "\n".join(out)
 
 
