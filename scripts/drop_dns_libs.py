@@ -119,8 +119,75 @@ def all_cmake_files():
     return found
 
 
+# common/src/utils.cpp exposes a C API for parsing DNS stamps (sdns:// URLs),
+# which is the other place that includes dns-libs headers. Nothing in our
+# configuration parses stamps - they describe DNS upstreams, and we do not send
+# any - so the functions become stubs that report failure rather than pretending
+# to have parsed something.
+def stub_dns_stamps(d):
+    lines = d.split("\n")
+
+    # Drop the include; without it nothing else in the file needs the package.
+    lines = [l for l in lines if "dns/dnsstamp/dns_stamp.h" not in l]
+
+    start = None
+    for i, line in enumerate(lines):
+        if line.startswith("VpnDnsStamp *vpn_dns_stamp_from_str"):
+            start = i
+            break
+    if start is None:
+        return "\n".join(lines)
+
+    # The block runs to the end of the last stamp function; find the closing
+    # brace of the one after which a non-stamp function begins.
+    end = None
+    for i in range(start, len(lines)):
+        if lines[i].startswith("void vpn_string_free"):
+            end = i
+            break
+    assert end is not None, "could not find the end of the stamp block"
+    while end > start and lines[end - 1].strip() == "":
+        end -= 1
+
+    stub = [
+        "// DNS stamp parsing needs dns-libs, which this build does not carry.",
+        "// Stamps describe DNS upstreams and we never send any, so these report",
+        "// failure instead of returning something that was not parsed.",
+        "VpnDnsStamp *vpn_dns_stamp_from_str(const char *stamp_str, const char **error) {",
+        "    (void) stamp_str;",
+        '    if (error != nullptr) {',
+        '        *error = marshal_str("DNS stamps are not supported in this build");',
+        "    }",
+        "    return nullptr;",
+        "}",
+        "",
+        "void vpn_dns_stamp_free(VpnDnsStamp *stamp) {",
+        "    (void) stamp;",
+        "}",
+        "",
+        "const char *vpn_dns_stamp_to_str(VpnDnsStamp *c_stamp) {",
+        "    (void) c_stamp;",
+        "    return nullptr;",
+        "}",
+        "",
+        "const char *vpn_dns_stamp_pretty_url(VpnDnsStamp *c_stamp) {",
+        "    (void) c_stamp;",
+        "    return nullptr;",
+        "}",
+        "",
+        "const char *vpn_dns_stamp_prettier_url(VpnDnsStamp *c_stamp) {",
+        "    (void) c_stamp;",
+        "    return nullptr;",
+        "}",
+        "",
+    ]
+    lines[start:end] = stub
+    return "\n".join(lines)
+
+
 def main():
     edit("conanfile.py", drop_requirement)
+    edit("common/src/utils.cpp", stub_dns_stamps)
     for rel in all_cmake_files():
         edit(rel, drop_cmake)
     p = os.path.join(root, "core/src/dns_proxy_accessor.cpp")
