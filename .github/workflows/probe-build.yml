@@ -116,23 +116,11 @@ jobs:
       # returns early when dns_upstreams is empty, and Irboard does not emit
       # deep-link tag 0x0D. Dropping the heaviest dependency changes size, not
       # behaviour.
+      # A script in this repo rather than Python nested inside YAML inside a
+      # heredoc - that shape broke this workflow twice on escape handling.
       - name: Drop dns-libs
         if: ${{ inputs.drop_dns_libs }}
-        working-directory: client
-        run: |
-          python3 - <<'PY'
-          import io
-          p = "conanfile.py"
-          out = []
-          for line in io.open(p, encoding="utf-8").read().split("\n"):
-              if "dns-libs" in line and "self.requires" in line:
-                  indent = line[:len(line) - len(line.lstrip())]
-                  out.append(indent + "pass  # dropped: never constructed in our config")
-              else:
-                  out.append(line)
-          io.open(p, "w", encoding="utf-8", newline="").write("\n".join(out))
-          PY
-          grep -c "dns-libs" conanfile.py || echo "dns-libs removed"
+        run: python3 scripts/drop_dns_libs.py client
 
       # Every AdGuard-namespaced dependency lives in one place: NativeLibsCommon
       # carries the recipes for its own patched dependencies under conan/recipes.
