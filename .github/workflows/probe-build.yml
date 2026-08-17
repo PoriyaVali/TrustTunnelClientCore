@@ -1,30 +1,39 @@
 name: probe-build
 
-# Find out what it actually takes to build the Android core, on a runner that
-# can reach the package index.
+# Work out what it takes to build the client core, on a runner that can reach
+# the package index.
 #
-# conancenter answers 403 from our network, so a local build cannot even resolve
-# brotli - a dependency that plainly exists. That is a network fact, not a
-# project fact, and it means this question can only be answered here. The same
-# thing was true of the endpoint: Windows could not compile it, and CI became
-# the compiler.
+# conancenter answers 403 from our own network, so a local build cannot resolve
+# even brotli - a network fact rather than anything about this project. The same
+# was true of the endpoint: Windows could not compile it, and CI became the
+# compiler.
 #
-# This workflow is deliberately allowed to fail. Its output is the answer.
+# The target is a parameter. Android is what the app needs first, but the client
+# supports Windows too and none of this should have to be rewritten to get
+# there - only a profile added below.
 
 on:
   workflow_dispatch:
     inputs:
+      target:
+        description: 'Which platform to resolve for'
+        type: choice
+        options: [android-arm64, android-arm32, windows-x64, linux-x64]
+        default: android-arm64
       client_ref:
-        description: 'Ref of PoriyaVali/TrustTunnelClient to probe'
+        description: 'Ref of PoriyaVali/TrustTunnelClient'
         default: 'master'
       drop_dns_libs:
-        description: 'Remove dns-libs before resolving (it never runs in our config)'
+        description: 'Remove dns-libs (never constructed in our config)'
         type: boolean
         default: true
 
 jobs:
   probe:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.target == 'windows-x64' && 'windows-latest' || 'ubuntu-latest' }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - name: Check out the client
         uses: actions/checkout@v4
@@ -33,50 +42,80 @@ jobs:
           ref: ${{ inputs.client_ref }}
           path: client
 
-      - name: Confirm the index is reachable from here
-        run: |
-          code=$(curl -s -o /dev/null -w '%{http_code}' https://center2.conan.io/v2/ping || true)
-          echo "conancenter ping: HTTP $code"
-          [ "$code" = "200" ] || echo "note: not 200 - the rest of this run will say whether it matters"
-
       - name: Tools
         run: |
           python3 -m pip install --quiet "conan>=2.0"
           conan --version
-          echo "NDK: ${ANDROID_NDK_LATEST_HOME:-none}"
-          ls "${ANDROID_NDK_LATEST_HOME}" >/dev/null && echo "NDK present"
+          conan profile detect --force
 
-      # Upstream ships these publicly, which is worth knowing: the Android
-      # cross-compilation profile does not have to be written from scratch.
-      - name: AdGuard's own conan profiles
+      # Upstream publishes its conan profiles - including the cross-compilation
+      # toolchains - as a plain release asset, so none of this has to be written.
+      - name: AdGuard's conan profiles
         run: |
           curl -sL -o /tmp/conanfiles.tar.gz \
             https://github.com/AdguardTeam/NativeLibsCommon/releases/latest/download/conanfiles.tar.gz
           mkdir -p /tmp/cf && tar -xzf /tmp/conanfiles.tar.gz -C /tmp/cf
-          conan profile detect --force
           CH="$(conan config home)"
           cp /tmp/cf/profiles/* "$CH/profiles/"
           cp /tmp/cf/settings_user.yml "$CH/" 2>/dev/null || true
-          cat > "$CH/profiles/android-arm64" <<'EOF'
-          include(android.jinja)
+          ls "$CH/profiles" | tr '\n' ' '; echo
 
+      # One case per target. Adding a platform later means adding a case here,
+      # and nothing else.
+      - name: Profile for ${{ inputs.target }}
+        run: |
+          CH="$(conan config home)"
+          case "${{ inputs.target }}" in
+            android-arm64|android-arm32)
+              if [ "${{ inputs.target }}" = "android-arm64" ]; then a=armv8; else a=armv7; fi
+              cat > "$CH/profiles/target" <<EOF
+          include(android.jinja)
           [settings]
           os=Android
           os.api_level=26
-          arch=armv8
+          arch=$a
           compiler=clang
           compiler.version=18
           compiler.libcxx=c++_static
           compiler.cppstd=20
           build_type=Release
+          [conf]
+          tools.android:ndk_path=${ANDROID_NDK_LATEST_HOME}
           EOF
-          echo "tools.android:ndk_path=${ANDROID_NDK_LATEST_HOME}" >> "$CH/profiles/android-arm64"
-          conan profile show -pr android-arm64 | head -20
+              ;;
+            windows-x64)
+              cat > "$CH/profiles/target" <<'EOF'
+          include(windows-msvc.jinja)
+          [settings]
+          os=Windows
+          arch=x86_64
+          compiler=msvc
+          compiler.version=194
+          compiler.runtime=static
+          compiler.cppstd=20
+          build_type=Release
+          EOF
+              ;;
+            linux-x64)
+              cat > "$CH/profiles/target" <<'EOF'
+          include(linux.jinja)
+          [settings]
+          os=Linux
+          arch=x86_64
+          compiler=gcc
+          compiler.version=13
+          compiler.libcxx=libstdc++11
+          compiler.cppstd=20
+          build_type=Release
+          EOF
+              ;;
+          esac
+          conan profile show -pr target | head -18
 
       # In our configuration the DNS proxy is never constructed: dns_handler
       # returns early when dns_upstreams is empty, and Irboard does not emit
-      # deep-link tag 0x0D. So dropping it changes size, not behaviour - and it
-      # is the heaviest of the seven AdGuard-namespaced dependencies.
+      # deep-link tag 0x0D. Dropping the heaviest dependency changes size, not
+      # behaviour.
       - name: Drop dns-libs
         if: ${{ inputs.drop_dns_libs }}
         working-directory: client
@@ -93,47 +132,70 @@ jobs:
                   out.append(line)
           io.open(p, "w", encoding="utf-8", newline="").write("\n".join(out))
           PY
-          grep -n "dns-libs" conanfile.py || echo "dns-libs removed"
+          grep -c "dns-libs" conanfile.py || echo "dns-libs removed"
 
-      # The AdGuard-namespaced packages name their own Conan recipe, not a
-      # proprietary library: the sources are public and carry the recipe. So
-      # rather than porting anything, export them from their own tags - one at a
-      # time, because each one exported reveals whether the next is even needed.
-      - name: Export AdGuard recipes from public sources
+      # Every AdGuard-namespaced dependency lives in one place: NativeLibsCommon
+      # carries the recipes for its own patched dependencies under conan/recipes.
+      # So this is one clone and a loop, not a hunt through seven repositories.
+      #
+      # Versions are read from the client's own requirements rather than listed
+      # here, so bumping the client cannot silently export the wrong ones.
+      - name: Export AdGuard recipes
         run: |
           set -eu
-          export_one() {
-            repo="$1"; tag="$2"; name="$3"
-            echo "--- $name from $repo@$tag"
-            rm -rf "/tmp/src_$name"
-            git clone --quiet --depth 1 --branch "$tag" "https://github.com/$repo" "/tmp/src_$name"
-            # The recipes carry no hardcoded version - their own CI passes it at
-            # export time - so derive it from the tag rather than reading the
-            # first failure as "this needs porting".
-            version="${tag#v}"
-            ( cd "/tmp/src_$name" && conan export . --version "$version" --user adguard --channel oss )               || { echo "    export failed - this one needs more than a version"; return 1; }
-          }
-          export_one AdguardTeam/NativeLibsCommon v8.1.49 native_libs_common || true
-          echo "=== what is in the local cache now ==="
-          conan list "*" 2>/dev/null | sed 's/^/  /' | head -20
+          git clone --quiet --depth 1 --branch v8.1.49 \
+            https://github.com/AdguardTeam/NativeLibsCommon /tmp/nlc
+          conan export /tmp/nlc --version 8.1.49 --user adguard --channel oss
 
-      # The point of the run. Expected to fail on the first AdGuard-namespaced
-      # package; what matters is how far it gets first, and whether everything
-      # else resolves.
-      # continue-on-error makes GitHub report this step as "success" even when
-      # it failed, which read as progress once and was not. The summary below is
-      # the honest signal; this only keeps the run going long enough to print it.
+          python3 - <<'PY' > /tmp/wanted.txt
+          import io, re
+          wanted = {}
+          for f in ["client/conanfile.py", "/tmp/nlc/conanfile.py"]:
+              try:
+                  d = io.open(f, encoding="utf-8").read()
+              except OSError:
+                  continue
+              for name, ver in re.findall(r'"([a-z0-9_.-]+)/([^@"]+)@adguard/oss"', d):
+                  wanted.setdefault(name, ver)
+          for name, ver in sorted(wanted.items()):
+              print(name, ver)
+          PY
+          echo "=== wanted from adguard ==="; sed 's/^/  /' /tmp/wanted.txt
+
+          while read -r name ver; do
+            [ -z "${name:-}" ] && continue
+            [ "$name" = "native_libs_common" ] && continue
+            dir=""
+            for cand in "/tmp/nlc/conan/recipes/$name-$ver" "/tmp/nlc/conan/recipes/$name"; do
+              if [ -f "$cand/conanfile.py" ]; then dir="$cand"; break; fi
+            done
+            if [ -z "$dir" ]; then
+              echo "  $name/$ver: NO RECIPE in NativeLibsCommon"
+              continue
+            fi
+            if conan export "$dir" --version "$ver" --user adguard --channel oss >/dev/null 2>&1; then
+              echo "  $name/$ver: exported from $(basename "$dir")"
+            else
+              echo "  $name/$ver: export FAILED from $(basename "$dir")"
+            fi
+          done < /tmp/wanted.txt
+
+      # continue-on-error makes GitHub report this step as "success" even when it
+      # failed - that read as progress once and was not. The summary below is the
+      # honest signal; this only keeps the run alive long enough to print it.
       - name: Resolve dependencies
         working-directory: client
         continue-on-error: true
         run: |
-          conan install . -pr:h android-arm64 -pr:b default --build=missing -of /tmp/out 2>&1 | tee /tmp/resolve.log
+          conan install . -pr:h target -pr:b default --build=missing -of /tmp/out 2>&1 | tee /tmp/resolve.log
 
       - name: What we learned
         run: |
-          echo "=== packages that resolved ==="
-          grep -oE "^[a-z0-9_.-]+/[0-9][^:]*: (Downloaded|Already installed|Building)" /tmp/resolve.log | sort -u | sed 's/^/  /' || echo "  none"
+          echo "=== target: ${{ inputs.target }} ==="
           echo "=== first failure ==="
-          grep -E "^ERROR" /tmp/resolve.log | head -3 | sed 's/^/  /' || echo "  none - it got through"
-          echo "=== packages still unresolvable ==="
+          grep -E "^ERROR" /tmp/resolve.log | head -3 | sed 's/^/  /' || echo "  none - resolution got through"
+          echo "=== still unresolvable from adguard ==="
           grep -oE "[a-z0-9_.-]+/[^@ ]+@adguard/oss" /tmp/resolve.log | sort -u | sed 's/^/  /' || echo "  none"
+          echo "=== how much got built ==="
+          echo "  building from source: $(grep -c 'Building from source' /tmp/resolve.log || true)"
+          echo "  downloaded:           $(grep -c 'Downloaded' /tmp/resolve.log || true)"
