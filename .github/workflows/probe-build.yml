@@ -187,13 +187,27 @@ jobs:
       - name: Rust for Android
         if: startsWith(inputs.target, 'android')
         run: |
-          rustup target add aarch64-linux-android armv7-linux-androideabi
+          set -eu
+          # The client pins its own toolchain (rust-toolchain.toml at its root),
+          # and `rustup target add` only ever touches the ACTIVE toolchain. The
+          # targets went to the runner's default, the pinned one was installed
+          # fresh by cargo with no Android std, and the build died at the first
+          # Rust crate with "error[E0463]: can't find crate for `std`".
+          #
+          # Read the channel rather than naming it, so a client bump cannot
+          # silently go back to equipping the wrong toolchain.
+          CHANNEL=$(grep channel client/rust-toolchain.toml | cut -d'"' -f2)
+          echo "  the client pins: $CHANNEL"
+          rustup toolchain install "$CHANNEL" --profile minimal \
+            --target aarch64-linux-android --target armv7-linux-androideabi
           # The build invokes `cargo ndk`, not plain cargo: cargo-ndk is what
           # sets the Android linker and sysroot for each target. Adding the
           # rustup targets alone is not enough - the command itself is missing.
           cargo install cargo-ndk --locked
           cargo ndk --version
-          rustc --version
+          # From inside the client, so the pin applies and this shows what the
+          # build will actually use.
+          cd client && rustup show
       # Gradle runs the CMake bundled with the SDK, which is 3.22.1, while the
       # project's root CMakeLists asks for 3.24. Install a newer one and point
       # the build at it explicitly rather than hoping AGP picks it.
@@ -222,7 +236,13 @@ jobs:
           # the configure output that precedes it is long.
           ./gradlew :lib:assembleRelease --no-daemon > /tmp/gradle.log 2>&1 || true
           echo "=== errors ==="
-          grep -nE "CMake Error|CMake Warning \(dev\)|error:|FAILED:|ninja: build stopped|What went wrong" -A 6 /tmp/gradle.log | head -80 || echo "  none matched"
+          # Two lessons in one line. "error:" does not match "error[E0463]:", so
+          # the only real error in the last run was filtered out of its own error
+          # report - hence the "error[[]" alternative, a bracket expression rather
+          # than an escape. And matching CMake's (dev) warnings filled all 80
+          # lines with harmless policy notices, which is the same failure as
+          # tailing the log: the signal was there and something else was printed.
+          grep -nE "CMake Error|error:|error[[]|FAILED:|ninja: build stopped|What went wrong" -A 8 /tmp/gradle.log | head -80 || echo "  none matched"
           echo "=== last 40 lines ==="
           tail -40 /tmp/gradle.log
 
