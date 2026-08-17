@@ -242,7 +242,14 @@ jobs:
         continue-on-error: true
         working-directory: client/platform/android
         run: |
-          ./gradlew :lib:assembleRelease --no-daemon 2>&1 | tail -200
+          # Keep the whole build log and pull the errors out of it. Tailing it
+          # hid the CMake error twice - at 60 lines and again at 200 - because
+          # the configure output that precedes it is long.
+          ./gradlew :lib:assembleRelease --no-daemon > /tmp/gradle.log 2>&1 || true
+          echo "=== errors ==="
+          grep -nE "CMake Error|CMake Warning \(dev\)|error:|FAILED:|ninja: build stopped|What went wrong" -A 6 /tmp/gradle.log | head -80 || echo "  none matched"
+          echo "=== last 40 lines ==="
+          tail -40 /tmp/gradle.log
 
       - name: Did an AAR come out?
         if: startsWith(inputs.target, 'android')
