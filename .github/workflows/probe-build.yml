@@ -211,6 +211,52 @@ jobs:
         run: |
           conan install . -pr:h target -pr:b default --build=missing -of /tmp/out 2>&1 | tee /tmp/resolve.log
 
+      # The native library links trusttunnel_deeplink_ffi, a Rust staticlib, so
+      # the Android build needs a Rust toolchain with the Android target as well
+      # as the NDK.
+      - name: Rust for Android
+        if: startsWith(inputs.target, 'android')
+        run: |
+          rustup target add aarch64-linux-android armv7-linux-androideabi
+          rustc --version
+
+      # Lightweight means one ABI. Each extra one is a full copy of the native
+      # library, and our users are on arm64.
+      - name: Build only the ABI we ship
+        if: startsWith(inputs.target, 'android')
+        working-directory: client/platform/android
+        run: |
+          abi=$([ "${{ inputs.target }}" = "android-arm64" ] && echo arm64-v8a || echo armeabi-v7a)
+          python3 - "$abi" <<'PY'
+          import io, sys
+          abi = sys.argv[1]
+          p = "lib/build.gradle.kts"
+          d = io.open(p, encoding="utf-8").read()
+          anchor = "        externalNativeBuild {"
+          assert d.count(anchor) == 1, "defaultConfig externalNativeBuild not found"
+          d = d.replace(anchor, '        ndk {
+            abiFilters += "%s"
+        }
+' % abi + anchor, 1)
+          io.open(p, "w", encoding="utf-8", newline="").write(d)
+          print("restricted to", abi)
+          PY
+
+      # The actual thing the app needs. Allowed to fail: this is still a probe,
+      # and where it stops is the answer.
+      - name: Build the AAR
+        if: startsWith(inputs.target, 'android')
+        continue-on-error: true
+        working-directory: client/platform/android
+        run: |
+          ./gradlew :lib:assembleRelease --no-daemon 2>&1 | tail -60
+
+      - name: Did an AAR come out?
+        if: startsWith(inputs.target, 'android')
+        run: |
+          find client/platform/android -name "*.aar" -printf "  %p  %s bytes
+" 2>/dev/null || echo "  no AAR produced"
+
       - name: What we learned
         run: |
           echo "=== target: ${{ inputs.target }} ==="
