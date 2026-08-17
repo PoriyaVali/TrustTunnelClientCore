@@ -159,60 +159,26 @@ jobs:
             ls /tmp/dnslibs | head -10
           fi
 
-          python3 - <<'PY' > /tmp/wanted.txt
-          import io, re
-          wanted = {}
-          for f in ["client/conanfile.py", "/tmp/nlc/conanfile.py"]:
-              try:
-                  d = io.open(f, encoding="utf-8").read()
-              except OSError:
-                  continue
-              for name, ver in re.findall(r'"([a-z0-9_.-]+)/([^@"]+)@adguard/oss"', d):
-                  wanted.setdefault(name, ver)
-          for name, ver in sorted(wanted.items()):
-              print(name, ver)
-          PY
-          echo "=== wanted from adguard ==="; sed 's/^/  /' /tmp/wanted.txt
-
-          while read -r name ver; do
-            [ -z "${name:-}" ] && continue
-            [ "$name" = "native_libs_common" ] && continue
-            # A recipe directory is not always named after the package it
-            # produces: conan/recipes/boringssl declares name="openssl",
-            # version="boring-2024-09-13". So find the directory whose recipe
-            # actually declares this name and version, and fall back to the
-            # directory named after the package.
-            dir=""
-            for cand in /tmp/nlc/conan/recipes/*/; do
-              [ -f "$cand/conanfile.py" ] || continue
-              if grep -q "name = \"$name\"" "$cand/conanfile.py" 2>/dev/null                  && grep -q "version = \"$ver\"" "$cand/conanfile.py" 2>/dev/null; then
-                dir="${cand%/}"; break
+          # Export every recipe rather than the ones named in a conanfile.
+          # Chasing them one at a time missed transitive ones - bringing
+          # dns-libs back pulled in libsodium, which no scan of the client had
+          # any reason to mention. Exporting is only registering a recipe, not
+          # building it, so the unused ones cost nothing.
+          for dir in /tmp/nlc/conan/recipes/*/; do
+            [ -f "$dir/conanfile.py" ] || continue
+            name=$(basename "$dir")
+            if grep -qE "^[[:space:]]*version[[:space:]]*=" "$dir/conanfile.py"; then
+              if conan export "$dir" --user adguard --channel oss >/dev/null 2>&1; then
+                echo "  $name: exported"
+              else
+                echo "  $name: export failed"
               fi
-            done
-            if [ -z "$dir" ]; then
-              for cand in "/tmp/nlc/conan/recipes/$name-$ver" "/tmp/nlc/conan/recipes/$name"; do
-                if [ -f "$cand/conanfile.py" ]; then dir="$cand"; break; fi
-              done
-            fi
-            if [ -z "$dir" ]; then
-              echo "  $name/$ver: NO RECIPE in NativeLibsCommon"
-              continue
-            fi
-
-            # A recipe that hardcodes its version rejects --version, so only
-            # pass it when the recipe does not set one itself.
-            if grep -qE "^\s*version\s*=" "$dir/conanfile.py" 2>/dev/null; then
-              out=$(conan export "$dir" --user adguard --channel oss 2>&1) && ok=1 || ok=0
             else
-              out=$(conan export "$dir" --version "$ver" --user adguard --channel oss 2>&1) && ok=1 || ok=0
+              echo "  $name: skipped (no version in recipe)"
             fi
-            if [ "$ok" = "1" ]; then
-              echo "  $name/$ver: exported from $(basename "$dir")"
-            else
-              echo "  $name/$ver: export FAILED from $(basename "$dir")"
-              echo "$out" | tail -3 | sed 's/^/      /'
-            fi
-          done < /tmp/wanted.txt
+          done
+          echo "=== recipes now in the cache ==="
+          conan list "*" 2>/dev/null | grep -E "^[a-z]" | sed "s/^/  /" | head -30
 
       # continue-on-error makes GitHub report this step as "success" even when it
       # failed - that read as progress once and was not. The summary below is the
