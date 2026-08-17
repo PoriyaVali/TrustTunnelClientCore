@@ -107,7 +107,11 @@ jobs:
             echo "--- $name from $repo@$tag"
             rm -rf "/tmp/src_$name"
             git clone --quiet --depth 1 --branch "$tag" "https://github.com/$repo" "/tmp/src_$name"
-            ( cd "/tmp/src_$name" && conan export . --user adguard --channel oss )               || { echo "    export failed - this one needs more than a plain export"; return 1; }
+            # The recipes carry no hardcoded version - their own CI passes it at
+            # export time - so derive it from the tag rather than reading the
+            # first failure as "this needs porting".
+            version="${tag#v}"
+            ( cd "/tmp/src_$name" && conan export . --version "$version" --user adguard --channel oss )               || { echo "    export failed - this one needs more than a version"; return 1; }
           }
           export_one AdguardTeam/NativeLibsCommon v8.1.49 native_libs_common || true
           echo "=== what is in the local cache now ==="
@@ -116,6 +120,9 @@ jobs:
       # The point of the run. Expected to fail on the first AdGuard-namespaced
       # package; what matters is how far it gets first, and whether everything
       # else resolves.
+      # continue-on-error makes GitHub report this step as "success" even when
+      # it failed, which read as progress once and was not. The summary below is
+      # the honest signal; this only keeps the run going long enough to print it.
       - name: Resolve dependencies
         working-directory: client
         continue-on-error: true
