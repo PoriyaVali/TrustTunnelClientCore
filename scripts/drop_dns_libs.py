@@ -182,6 +182,21 @@ def stub_dns_stamps(d):
         "",
     ]
     lines[start:end] = stub
+
+    # Helpers that only the removed functions called are now orphaned, and the
+    # project builds with -Werror, so an unused static function is a build
+    # failure. Marked rather than deleted: restoring dns-libs later should not
+    # also mean rewriting these.
+    for i, line in enumerate(lines):
+        s = line.lstrip()
+        if s.startswith("static ") and "(" in s and "[[maybe_unused]]" not in line:
+            name = s.split("(")[0].split()[-1].lstrip("*&")
+            # Count uses outside its own definition.
+            uses = sum(1 for l in lines if name in l) - 1
+            if uses <= 0:
+                indent = line[:len(line) - len(s)]
+                lines[i] = indent + "[[maybe_unused]] " + s
+
     return "\n".join(lines)
 
 
