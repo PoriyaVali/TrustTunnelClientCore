@@ -1,0 +1,10 @@
+# Build output
+build/
+.gradle/
+*.aar
+!vendor/*.aar
+local.properties
+
+# Conan
+conan/
+.conan2/
