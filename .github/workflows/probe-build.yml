@@ -59,6 +59,43 @@ jobs:
           # and pin needs to say what it is.
           fetch-depth: 0
 
+      # Every run rebuilt everything from zero: ~15 Conan packages compiled
+      # from source, every crate, every Gradle download. None of that changes
+      # between runs, and the whole build is ~20 minutes.
+      #
+      # Local building would cache all of this and is the better answer, but it
+      # cannot fetch: conancenter and crates.io both answer 403 from our
+      # network while github.com answers 200. So the cache belongs here.
+      #
+      # Keyed on the files that decide the contents, with restore-keys so a
+      # changed conanfile still starts from the previous cache instead of from
+      # nothing.
+      - name: Cache the Conan packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.conan2
+          key: conan-${{ inputs.target }}-${{ hashFiles('client/conanfile.py') }}
+          restore-keys: conan-${{ inputs.target }}-
+
+      - name: Cache the crates
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+          key: cargo-${{ inputs.target }}-${{ hashFiles('client/trusttunnel/**/Cargo.toml') }}
+          restore-keys: cargo-${{ inputs.target }}-
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ hashFiles('client/platform/android/**/*.gradle.kts', 'client/platform/android/gradle/libs.versions.toml') }}
+          restore-keys: gradle-
+
       - name: Tools
         run: |
           python3 -m pip install --quiet "conan>=2.0"
@@ -237,7 +274,12 @@ jobs:
           # The build invokes `cargo ndk`, not plain cargo: cargo-ndk is what
           # sets the Android linker and sysroot for each target. Adding the
           # rustup targets alone is not enough - the command itself is missing.
-          cargo install cargo-ndk --locked
+          # ~/.cargo/bin is cached, so on most runs it is already built.
+          if command -v cargo-ndk >/dev/null; then
+            echo "  cargo-ndk restored from cache"
+          else
+            cargo install cargo-ndk --locked
+          fi
           cargo ndk --version
           # From inside the client, so the pin applies and this shows what the
           # build will actually use.
