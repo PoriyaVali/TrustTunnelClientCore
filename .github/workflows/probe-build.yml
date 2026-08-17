@@ -165,18 +165,40 @@ jobs:
           while read -r name ver; do
             [ -z "${name:-}" ] && continue
             [ "$name" = "native_libs_common" ] && continue
+            # A recipe directory is not always named after the package it
+            # produces: conan/recipes/boringssl declares name="openssl",
+            # version="boring-2024-09-13". So find the directory whose recipe
+            # actually declares this name and version, and fall back to the
+            # directory named after the package.
             dir=""
-            for cand in "/tmp/nlc/conan/recipes/$name-$ver" "/tmp/nlc/conan/recipes/$name"; do
-              if [ -f "$cand/conanfile.py" ]; then dir="$cand"; break; fi
+            for cand in /tmp/nlc/conan/recipes/*/; do
+              [ -f "$cand/conanfile.py" ] || continue
+              if grep -q "name = \"$name\"" "$cand/conanfile.py" 2>/dev/null                  && grep -q "version = \"$ver\"" "$cand/conanfile.py" 2>/dev/null; then
+                dir="${cand%/}"; break
+              fi
             done
+            if [ -z "$dir" ]; then
+              for cand in "/tmp/nlc/conan/recipes/$name-$ver" "/tmp/nlc/conan/recipes/$name"; do
+                if [ -f "$cand/conanfile.py" ]; then dir="$cand"; break; fi
+              done
+            fi
             if [ -z "$dir" ]; then
               echo "  $name/$ver: NO RECIPE in NativeLibsCommon"
               continue
             fi
-            if conan export "$dir" --version "$ver" --user adguard --channel oss >/dev/null 2>&1; then
+
+            # A recipe that hardcodes its version rejects --version, so only
+            # pass it when the recipe does not set one itself.
+            if grep -qE "^\s*version\s*=" "$dir/conanfile.py" 2>/dev/null; then
+              out=$(conan export "$dir" --user adguard --channel oss 2>&1) && ok=1 || ok=0
+            else
+              out=$(conan export "$dir" --version "$ver" --user adguard --channel oss 2>&1) && ok=1 || ok=0
+            fi
+            if [ "$ok" = "1" ]; then
               echo "  $name/$ver: exported from $(basename "$dir")"
             else
               echo "  $name/$ver: export FAILED from $(basename "$dir")"
+              echo "$out" | tail -3 | sed 's/^/      /'
             fi
           done < /tmp/wanted.txt
 
