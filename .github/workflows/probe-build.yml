@@ -35,6 +35,11 @@ jobs:
       run:
         shell: bash
     steps:
+      # This repository too: the scripts the workflow runs live here, and
+      # checking out only the client left them missing on the runner.
+      - name: Check out this repository
+        uses: actions/checkout@v4
+
       - name: Check out the client
         uses: actions/checkout@v4
         with:
