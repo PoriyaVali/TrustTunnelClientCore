@@ -188,6 +188,11 @@ jobs:
         if: startsWith(inputs.target, 'android')
         run: |
           rustup target add aarch64-linux-android armv7-linux-androideabi
+          # The build invokes `cargo ndk`, not plain cargo: cargo-ndk is what
+          # sets the Android linker and sysroot for each target. Adding the
+          # rustup targets alone is not enough - the command itself is missing.
+          cargo install cargo-ndk --locked
+          cargo ndk --version
           rustc --version
       # Gradle runs the CMake bundled with the SDK, which is 3.22.1, while the
       # project's root CMakeLists asks for 3.24. Install a newer one and point
