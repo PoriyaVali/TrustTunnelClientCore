@@ -30,6 +30,9 @@ on:
       abis:
         description: 'Android ABIs to build. Upstream builds all four; we ship two'
         default: 'arm64-v8a,armeabi-v7a'
+      min_sdk:
+        description: 'Minimum Android API. Upstream is 26; our app supports 24'
+        default: '24'
       own_rust_dep:
         description: 'Take the Rust deeplink crate from our fork instead of AdGuard'
         type: boolean
@@ -158,11 +161,15 @@ jobs:
           case "${{ inputs.target }}" in
             android-arm64|android-arm32)
               if [ "${{ inputs.target }}" = "android-arm64" ]; then a=armv8; else a=armv7; fi
+              # api_level must match the Gradle minSdk below. If Conan builds
+              # the C++ dependencies against 26 while AGP compiles the library
+              # at 24, nothing complains and the mismatch only shows up as a
+              # missing symbol on an old phone.
               cat > "$CH/profiles/target" <<EOF
           include(android.jinja)
           [settings]
           os=Android
-          os.api_level=26
+          os.api_level=${{ inputs.min_sdk }}
           arch=$a
           compiler=clang
           compiler.version=18
@@ -338,6 +345,13 @@ jobs:
         if: startsWith(inputs.target, 'android')
         run: python3 scripts/select_abis.py client "${{ inputs.abis }}"
 
+      # Upstream's 26 fails our app's manifest merge at 24. Rebuilding is only
+      # an option because this build is ours; see the script for the reasoning
+      # and for why a compile failure here would be the good outcome.
+      - name: Minimum Android version
+        if: startsWith(inputs.target, 'android')
+        run: python3 scripts/set_min_sdk.py client "${{ inputs.min_sdk }}"
+
       # The actual thing the app needs. This built successfully on
       # b9a2c54, so it is no longer a probe that is allowed to fail:
       # continue-on-error would now hide a regression behind a green run, and
@@ -376,6 +390,14 @@ jobs:
           unzip -l "$AAR" | grep "\.so$" || { echo "  NO .so IN THE AAR"; exit 1; }
           echo "=== every ABI present ==="
           unzip -l "$AAR" | grep -oE "jni/[a-z0-9_-]+" | sort -u
+          echo "=== the minSdk it declares ==="
+          # From the artefact, not from what we asked for. The manifest is what
+          # the consuming app's merger reads, and a build that quietly kept 26
+          # would fail again in the app rather than here.
+          unzip -p "$AAR" AndroidManifest.xml | tr -d '\0' | grep -oE 'minSdkVersion="[0-9]+"'
+          unzip -p "$AAR" AndroidManifest.xml | tr -d '\0' \
+            | grep -q "minSdkVersion=\"${{ inputs.min_sdk }}\"" \
+            || { echo "  AAR does not declare minSdk ${{ inputs.min_sdk }}"; exit 1; }
 
       # Where the Rust crate actually came from, from the lock file rather than
       # from the build log.
