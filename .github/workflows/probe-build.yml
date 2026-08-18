@@ -342,6 +342,30 @@ jobs:
           echo "=== every ABI present ==="
           unzip -l "$AAR" | grep -oE "jni/[a-z0-9_-]+" | sort -u
 
+      # Where the Rust crate actually came from, from the lock file rather than
+      # from the build log.
+      #
+      # The log does not answer this: ninja only echoes cargo's output when the
+      # command fails, so the "Updating git repository ..." line appears in
+      # failed runs and never in successful ones. Reading it from Cargo.lock is
+      # both direct and independent of whether anything failed - the lock names
+      # the source and the exact commit.
+      #
+      # This is the claim the whole exercise rests on. Patching a file and
+      # seeing a green build is not the same as having checked.
+      - name: Where did the Rust crate come from?
+        if: startsWith(inputs.target, 'android')
+        run: |
+          LOCK=$(find client -name Cargo.lock | head -1)
+          if [ -z "$LOCK" ]; then echo "  no Cargo.lock - cannot verify"; exit 1; fi
+          echo "  lock: $LOCK"
+          grep -A3 'name = "trusttunnel-deeplink"' "$LOCK" | sed 's/^/  /'
+          if grep -q "github.com/TrustTunnel/TrustTunnel" "$LOCK"; then
+            echo "  STILL BUILDING FROM ADGUARD"
+            exit 1
+          fi
+          echo "  no AdGuard source in the lock file"
+
       - name: Keep the AAR
         if: startsWith(inputs.target, 'android')
         uses: actions/upload-artifact@v4
