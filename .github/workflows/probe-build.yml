@@ -34,10 +34,15 @@ on:
         description: 'Take the Rust deeplink crate from our fork instead of AdGuard'
         type: boolean
         default: true
+      release_tag:
+        description: 'Publish the AAR under this release tag. Empty means build only'
+        default: ''
 
 jobs:
   probe:
     runs-on: ${{ inputs.target == 'windows-x64' && 'windows-latest' || 'ubuntu-latest' }}
+    permissions:
+      contents: write
     defaults:
       run:
         shell: bash
@@ -403,6 +408,38 @@ jobs:
           name: trusttunnel-client-${{ inputs.target }}
           path: client/platform/android/lib/build/outputs/aar/*.aar
           if-no-files-found: error
+
+      # Published the way the app already consumes its other three cores: a
+      # release asset fetched by plain curl, with the version pinned in the
+      # app's dependencies.properties. Not GitHub Packages - `make cores`
+      # fetches mihomo and mdns exactly like this, and a second mechanism for
+      # the fourth core would be a second thing to keep working.
+      #
+      # 🔑 The asset name is an interface. The app's Makefile fetches by name,
+      # so renaming this is a 404 in someone else's build, not here.
+      - name: Publish the AAR
+        if: ${{ inputs.release_tag != '' && startsWith(inputs.target, 'android') }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          AAR=$(find client/platform/android -name "*.aar" | head -1)
+          cp "$AAR" trusttunnel-client.aar
+          ls -lh trusttunnel-client.aar
+          TAG="${{ inputs.release_tag }}"
+          # Create the release, or upload into it if it is already there, so
+          # re-running for the same tag replaces the asset instead of failing.
+          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "  release exists, replacing the asset"
+            gh release upload "$TAG" trusttunnel-client.aar --clobber --repo "${{ github.repository }}"
+          else
+            gh release create "$TAG" trusttunnel-client.aar \
+              --repo "${{ github.repository }}" \
+              --title "TrustTunnel client core $TAG" \
+              --notes "Android core for TrustTunnel, built from PoriyaVali/TrustTunnelClient.
+          ABIs: ${{ inputs.abis }}. Every build source is under our own account."
+          fi
+          echo "  https://github.com/${{ github.repository }}/releases/download/$TAG/trusttunnel-client.aar"
 
       - name: What we learned
         run: |
