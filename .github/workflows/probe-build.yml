@@ -47,6 +47,22 @@ jobs:
       - name: Check out this repository
         uses: actions/checkout@v4
 
+      # The independence claim, checked by the build rather than by me reading
+      # the file afterwards. Every source this workflow fetches from must be
+      # one of ours; a URL added later that is not gets caught here instead of
+      # the day the upstream repository goes away.
+      - name: Nothing is fetched from upstream
+        run: |
+          set -eu
+          FOREIGN=$(grep -oE "https://github\.com/[A-Za-z0-9_.-]+" .github/workflows/probe-build.yml \
+            | sort -u | grep -v "github.com/PoriyaVali" || true)
+          if [ -n "$FOREIGN" ]; then
+            echo "  fetches from outside our account:"
+            echo "$FOREIGN" | sed 's/^/    /'
+            exit 1
+          fi
+          echo "  every source is under PoriyaVali"
+
       - name: Check out the client
         uses: actions/checkout@v4
         with:
@@ -102,17 +118,32 @@ jobs:
           conan --version
           conan profile detect --force
 
-      # Upstream publishes its conan profiles - including the cross-compilation
-      # toolchains - as a plain release asset, so none of this has to be written.
-      - name: AdGuard's conan profiles
+      # Everything the C++ side needs, from our own fork.
+      #
+      # This used to be three separate fetches from AdguardTeam: a release
+      # asset for the profiles, a clone for the recipes, and a clone of
+      # DnsLibs. Owner's decision 2026-08-18: take whatever is needed so the
+      # next stage is entirely ours. Both are forked, so upstream can still be
+      # merged in when it moves - which copying the files would have cost us.
+      #
+      # 🔑 A fork does NOT carry releases, so the release asset would have been
+      # a 404. It did not need to be an asset at all: `conan/profiles/` and
+      # `conan/settings_user.yml` are plain files in the repository, and the
+      # tarball is only a packaging of them. One clone now serves both this
+      # step and the recipe export.
+      - name: Clone our NativeLibsCommon fork
         run: |
-          curl -sL -o /tmp/conanfiles.tar.gz \
-            https://github.com/AdguardTeam/NativeLibsCommon/releases/latest/download/conanfiles.tar.gz
-          mkdir -p /tmp/cf && tar -xzf /tmp/conanfiles.tar.gz -C /tmp/cf
+          set -eu
+          git clone --quiet --depth 1 --branch v8.1.49 \
+            https://github.com/PoriyaVali/NativeLibsCommon /tmp/nlc
           CH="$(conan config home)"
-          cp /tmp/cf/profiles/* "$CH/profiles/"
-          cp /tmp/cf/settings_user.yml "$CH/" 2>/dev/null || true
-          ls "$CH/profiles" | tr '\n' ' '; echo
+          cp /tmp/nlc/conan/profiles/* "$CH/profiles/"
+          cp /tmp/nlc/conan/settings_user.yml "$CH/"
+          echo "  profiles: $(ls "$CH/profiles" | tr '\n' ' ')"
+          # The Android cross-compilation profile is the one this build cannot
+          # do without; a silently missing profile fails much later and
+          # elsewhere.
+          test -f "$CH/profiles/android.jinja"
 
       # One case per target. Adding a platform later means adding a case here,
       # and nothing else.
@@ -190,11 +221,10 @@ jobs:
       #
       # Versions are read from the client's own requirements rather than listed
       # here, so bumping the client cannot silently export the wrong ones.
-      - name: Export AdGuard recipes
+      - name: Export the recipes
         run: |
           set -eu
-          git clone --quiet --depth 1 --branch v8.1.49 \
-            https://github.com/AdguardTeam/NativeLibsCommon /tmp/nlc
+          # /tmp/nlc is already here from the profiles step - one clone, both uses.
           conan export /tmp/nlc --version 8.1.49 --user adguard --channel oss
 
           # DnsLibs at the exact commit the client asks for, not at the tag.
@@ -202,7 +232,7 @@ jobs:
           # v2.10.1 - and that commit is precisely the one that bumps
           # native_libs_common from 8.1.48 to 8.1.49. Exporting from the tag
           # produced a version conflict that does not exist upstream.
-          git clone --quiet --filter=blob:none https://github.com/AdguardTeam/DnsLibs /tmp/dnslibs
+          git clone --quiet --filter=blob:none https://github.com/PoriyaVali/DnsLibs /tmp/dnslibs
           git -C /tmp/dnslibs checkout --quiet 7748c6a7
           echo "  DnsLibs pins: $(grep -o 'native_libs_common/[0-9.]*' /tmp/dnslibs/conanfile.py | head -1)"
           conan export /tmp/dnslibs --version 2.10.1-1-g7748c6a7 --user adguard --channel oss
