@@ -244,13 +244,22 @@ jobs:
       # Versions are read from the client's own requirements rather than listed
       # here, so bumping the client cannot silently export the wrong ones.
       - name: Export the recipes
+        env:
+          DROP_DNS_LIBS: ${{ inputs.drop_dns_libs }}
         run: |
           set -eu
-          # The pins above must be what this client asks for.
-          want_nlc=$(grep -oE 'native_libs_common/[^@"]+' client/conanfile.py | head -1 | cut -d/ -f2)
-          want_dns=$(grep -oE 'dns-libs/[^@"]+' client/conanfile.py | head -1 | cut -d/ -f2)
+          # The pins above must be what this client asks for. With dns-libs
+          # dropped, "Drop dns-libs" has already taken its requirement out of
+          # the conanfile, so there is no dns-libs version to compare, and
+          # nothing of DnsLibs to export.
+          want_nlc=$(grep -oE 'native_libs_common/[^@"]+' client/conanfile.py | head -1 | cut -d/ -f2 || true)
+          if [ "$DROP_DNS_LIBS" = true ]; then
+            want_dns=dropped
+          else
+            want_dns=$(grep -oE 'dns-libs/[^@"]+' client/conanfile.py | head -1 | cut -d/ -f2 || true)
+          fi
           echo "  the client wants native_libs_common $want_nlc and dns-libs $want_dns"
-          if [ "$want_nlc" != "$NLC_VERSION" ] || [ "$want_dns" != "$DNSLIBS_VERSION" ]; then
+          if [ "$want_nlc" != "$NLC_VERSION" ] || { [ "$want_dns" != dropped ] && [ "$want_dns" != "$DNSLIBS_VERSION" ]; }; then
             echo "  but this workflow pins $NLC_VERSION and $DNSLIBS_VERSION: update NLC_* and DNSLIBS_*"
             exit 1
           fi
@@ -263,12 +272,14 @@ jobs:
           # tag - here the one that bumps native_libs_common to 8.1.54 - and
           # exporting from the tag produced a version conflict that does not
           # exist upstream.
-          git clone --quiet --filter=blob:none https://github.com/PoriyaVali/DnsLibs /tmp/dnslibs
-          git -C /tmp/dnslibs checkout --quiet "$DNSLIBS_COMMIT"
-          echo "  DnsLibs pins: $(grep -o 'native_libs_common/[0-9.]*' /tmp/dnslibs/conanfile.py | head -1)"
-          grep -q "native_libs_common/$NLC_VERSION" /tmp/dnslibs/conanfile.py \
-            || { echo "  DnsLibs $DNSLIBS_COMMIT does not ask for native_libs_common $NLC_VERSION"; exit 1; }
-          conan export /tmp/dnslibs --version "$DNSLIBS_VERSION" --user adguard --channel oss
+          if [ "$want_dns" != dropped ]; then
+            git clone --quiet --filter=blob:none https://github.com/PoriyaVali/DnsLibs /tmp/dnslibs
+            git -C /tmp/dnslibs checkout --quiet "$DNSLIBS_COMMIT"
+            echo "  DnsLibs pins: $(grep -o 'native_libs_common/[0-9.]*' /tmp/dnslibs/conanfile.py | head -1)"
+            grep -q "native_libs_common/$NLC_VERSION" /tmp/dnslibs/conanfile.py \
+              || { echo "  DnsLibs $DNSLIBS_COMMIT does not ask for native_libs_common $NLC_VERSION"; exit 1; }
+            conan export /tmp/dnslibs --version "$DNSLIBS_VERSION" --user adguard --channel oss
+          fi
 
 
           # Export every recipe rather than the ones named in a conanfile.
