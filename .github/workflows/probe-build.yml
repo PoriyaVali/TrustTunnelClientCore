@@ -41,6 +41,16 @@ on:
         description: 'Publish the AAR under this release tag. Empty means build only'
         default: ''
 
+# What the client asks for, from our forks. The forks carry no tags past
+# what they were forked with, so each is pinned by the commit upstream tagged;
+# "Export the recipes" fails if the client asks for anything else, so bumping
+# the client without these is caught before it costs a build.
+env:
+  NLC_VERSION: '8.1.54'
+  NLC_COMMIT: 00b38bb2a4b206b677ad1f2b901ccb8bb0d60372
+  DNSLIBS_VERSION: '2.10.2-6-gc68d7dde'
+  DNSLIBS_COMMIT: c68d7dde992a147587b8ac200ae3b7d978c3e378
+
 jobs:
   probe:
     runs-on: ${{ inputs.target == 'windows-x64' && 'windows-latest' || 'ubuntu-latest' }}
@@ -142,8 +152,8 @@ jobs:
       - name: Clone our NativeLibsCommon fork
         run: |
           set -eu
-          git clone --quiet --depth 1 --branch v8.1.49 \
-            https://github.com/PoriyaVali/NativeLibsCommon /tmp/nlc
+          git clone --quiet --filter=blob:none https://github.com/PoriyaVali/NativeLibsCommon /tmp/nlc
+          git -C /tmp/nlc checkout --quiet "$NLC_COMMIT"
           CH="$(conan config home)"
           cp /tmp/nlc/conan/profiles/* "$CH/profiles/"
           cp /tmp/nlc/conan/settings_user.yml "$CH/"
@@ -234,20 +244,42 @@ jobs:
       # Versions are read from the client's own requirements rather than listed
       # here, so bumping the client cannot silently export the wrong ones.
       - name: Export the recipes
+        env:
+          DROP_DNS_LIBS: ${{ inputs.drop_dns_libs }}
         run: |
           set -eu
-          # /tmp/nlc is already here from the profiles step - one clone, both uses.
-          conan export /tmp/nlc --version 8.1.49 --user adguard --channel oss
+          # The pins above must be what this client asks for. With dns-libs
+          # dropped, "Drop dns-libs" has already taken its requirement out of
+          # the conanfile, so there is no dns-libs version to compare, and
+          # nothing of DnsLibs to export.
+          want_nlc=$(grep -oE 'native_libs_common/[^@"]+' client/conanfile.py | head -1 | cut -d/ -f2 || true)
+          if [ "$DROP_DNS_LIBS" = true ]; then
+            want_dns=dropped
+          else
+            want_dns=$(grep -oE 'dns-libs/[^@"]+' client/conanfile.py | head -1 | cut -d/ -f2 || true)
+          fi
+          echo "  the client wants native_libs_common $want_nlc and dns-libs $want_dns"
+          if [ "$want_nlc" != "$NLC_VERSION" ] || { [ "$want_dns" != dropped ] && [ "$want_dns" != "$DNSLIBS_VERSION" ]; }; then
+            echo "  but this workflow pins $NLC_VERSION and $DNSLIBS_VERSION: update NLC_* and DNSLIBS_*"
+            exit 1
+          fi
 
-          # DnsLibs at the exact commit the client asks for, not at the tag.
-          # The client wants dns-libs/2.10.1-1-g7748c6a7 - one commit after
-          # v2.10.1 - and that commit is precisely the one that bumps
-          # native_libs_common from 8.1.48 to 8.1.49. Exporting from the tag
-          # produced a version conflict that does not exist upstream.
-          git clone --quiet --filter=blob:none https://github.com/PoriyaVali/DnsLibs /tmp/dnslibs
-          git -C /tmp/dnslibs checkout --quiet 7748c6a7
-          echo "  DnsLibs pins: $(grep -o 'native_libs_common/[0-9.]*' /tmp/dnslibs/conanfile.py | head -1)"
-          conan export /tmp/dnslibs --version 2.10.1-1-g7748c6a7 --user adguard --channel oss
+          # /tmp/nlc is already here from the profiles step - one clone, both uses.
+          conan export /tmp/nlc --version "$NLC_VERSION" --user adguard --channel oss
+
+          # DnsLibs at the exact commit the client asks for, not at a tag. A
+          # dns-libs version like 2.10.2-6-gc68d7dde names a commit after the
+          # tag - here the one that bumps native_libs_common to 8.1.54 - and
+          # exporting from the tag produced a version conflict that does not
+          # exist upstream.
+          if [ "$want_dns" != dropped ]; then
+            git clone --quiet --filter=blob:none https://github.com/PoriyaVali/DnsLibs /tmp/dnslibs
+            git -C /tmp/dnslibs checkout --quiet "$DNSLIBS_COMMIT"
+            echo "  DnsLibs pins: $(grep -o 'native_libs_common/[0-9.]*' /tmp/dnslibs/conanfile.py | head -1)"
+            grep -q "native_libs_common/$NLC_VERSION" /tmp/dnslibs/conanfile.py \
+              || { echo "  DnsLibs $DNSLIBS_COMMIT does not ask for native_libs_common $NLC_VERSION"; exit 1; }
+            conan export /tmp/dnslibs --version "$DNSLIBS_VERSION" --user adguard --channel oss
+          fi
 
 
           # Export every recipe rather than the ones named in a conanfile.
@@ -356,6 +388,29 @@ jobs:
       # b9a2c54, so it is no longer a probe that is allowed to fail:
       # continue-on-error would now hide a regression behind a green run, and
       # it already did that once.
+      # The AAR and its native library take their version from TT_CLIENT_VERSION
+      # before git describe. Our client fork has none of upstream's tags after
+      # v1.1.5-rc.5, so describe would name that one; a release must say what
+      # it is.
+      - name: Version from the release tag
+        if: ${{ inputs.release_tag != '' }}
+        env:
+          TAG: ${{ inputs.release_tag }}
+        run: |
+          echo "TT_CLIENT_VERSION=${TAG#v}" >> "$GITHUB_ENV"
+          echo "  version: ${TAG#v}"
+
+      # The runner's default JDK moved to 25, and Gradle 8.11.1 cannot run on
+      # it: the build stopped with nothing but "What went wrong: 25.0.5". The
+      # Android Gradle plugin 8.9 needs 17 or newer, so pin 17 rather than
+      # take whatever the image ships next.
+      - name: A JDK this Gradle runs on
+        if: startsWith(inputs.target, 'android')
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
       - name: Build the AAR
         if: startsWith(inputs.target, 'android')
         working-directory: client/platform/android
@@ -390,6 +445,16 @@ jobs:
           unzip -l "$AAR" | grep "\.so$" || { echo "  NO .so IN THE AAR"; exit 1; }
           echo "=== every ABI present ==="
           unzip -l "$AAR" | grep -oE "jni/[a-z0-9_-]+" | sort -u
+          if [ -n "${TT_CLIENT_VERSION:-}" ]; then
+            echo "=== the version each native library carries ==="
+            for so in $(unzip -l "$AAR" | grep -oE "jni/[^ ]+\.so$"); do
+              if unzip -p "$AAR" "$so" | strings | grep -qF "$TT_CLIENT_VERSION"; then
+                echo "  $so: $TT_CLIENT_VERSION"
+              else
+                echo "::warning::$so does not mention $TT_CLIENT_VERSION"
+              fi
+            done
+          fi
           echo "=== the minSdk it declares ==="
           # From the artefact, not from what we asked for. The manifest is what
           # the consuming app's merger reads, and a build that quietly kept 26
