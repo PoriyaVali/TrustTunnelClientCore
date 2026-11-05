@@ -389,6 +389,17 @@ jobs:
           echo "TT_CLIENT_VERSION=${TAG#v}" >> "$GITHUB_ENV"
           echo "  version: ${TAG#v}"
 
+      # The runner's default JDK moved to 25, and Gradle 8.11.1 cannot run on
+      # it: the build stopped with nothing but "What went wrong: 25.0.5". The
+      # Android Gradle plugin 8.9 needs 17 or newer, so pin 17 rather than
+      # take whatever the image ships next.
+      - name: A JDK this Gradle runs on
+        if: startsWith(inputs.target, 'android')
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
       - name: Build the AAR
         if: startsWith(inputs.target, 'android')
         working-directory: client/platform/android
